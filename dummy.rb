@@ -6,6 +6,10 @@ class Client
     @status = status
   end
 
+  def update_status(new_status)
+    @status = new_status  # No validation, potential hole
+  end
+  
   def classify_lead
     if @status == 'hot'
       'Priority'
