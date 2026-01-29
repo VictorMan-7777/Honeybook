@@ -58,7 +58,7 @@ The MVP focuses on three core pillars:
 ### Assumptions
 
 - **Solo Development Model**: Assumes one developer using Claude Code/AI acceleration as primary tool for rapid implementation. Manual code review + pair programming for critical sections.
-- **Google API Quotas**: Assumes Google Calendar API quota is sufficient for MVP (~100 users). Action: Request quota increase Week 1 if concerned; fallback to polling reduces quota usage.
+- **Google API Quotas**: Assumes Google Calendar API quota is sufficient for MVP (~100 users × 1 poll/5 min = ~20 calls/min). Action: Request quota increase Week 1 if concerned; implement exponential backoff on 429 errors; monitor quota usage via Sentry alerts at 80% threshold; graceful degradation shows "Sync paused" banner if quota exceeded.
 - **Stripe Integration Deferred**: Assumes basic Stripe setup post-MVP (no complex subscriptions, recurring billing, or payment plans initially). Initial payment: simple one-time or monthly flat rate.
 - **Team Availability**: Assumes ability to dedicate 15 hrs/week solo development + AI acceleration. Timeline extends proportionally if fewer hours available.
 - **No Existing Users to Migrate**: Assumes greenfield launch; no complex data migration from legacy systems required.
@@ -94,7 +94,7 @@ The MVP focuses on three core pillars:
 | FR1.2 | User can log in with email/password credentials |
 | FR1.3 | User can authenticate via Google OAuth (Google Sign-In) |
 | FR1.4 | User can reset forgotten password via email link |
-| FR1.5 | Session management: JWT tokens with 24-hour expiry |
+| FR1.5 | Session management: JWT access tokens (15-min expiry) + refresh tokens (7-day expiry, httpOnly cookie). Refresh endpoint rotates tokens. |
 | FR1.6 | User can log out and invalidate session |
 | FR1.7 | User account profile: name, email, timezone, company name |
 
@@ -112,7 +112,7 @@ The MVP focuses on three core pillars:
 | FR2.9 | View activity log: last contact, interactions, events |
 | FR2.10 | Assign tags to clients (e.g., "photography", "referral") |
 | FR2.11 | Export clients to CSV format |
-| FR2.12 | Import clients from CSV (bulk create with validation) |
+| FR2.12 | Import clients from CSV (bulk create with validation). **Validation**: Email format, duplicate detection (skip or prompt), required fields. **Rollback**: Wrap in DB transaction; rollback all on critical error. **Performance**: Batch processing (100 rows/batch) for 500+ imports. |
 
 ### FR3: Lead Pipeline Management
 | Requirement | Description |
@@ -129,13 +129,13 @@ The MVP focuses on three core pillars:
 ### FR4: Scheduling & Calendar Integration
 | Requirement | Description |
 |-------------|-------------|
-| FR4.1 | Create appointment/booking for a client with date/time |
+| FR4.1 | Create appointment/booking for a client with date/time (start + end required). **Double-booking prevention**: Check for overlapping time slots before save; error "Time slot unavailable" if conflict detected. |
 | FR4.2 | View calendar in month/week/day view |
 | FR4.3 | Authenticate with Google Calendar (OAuth) |
 | FR4.4 | One-way sync: Create booking in app → syncs to Google Calendar |
-| FR4.5 | Two-way sync: Changes in Google Calendar reflect in app (poll every 5 min) |
+| FR4.5 | Two-way sync: Changes in Google Calendar reflect in app (poll every 5 min). **Conflict Resolution**: Last-write-wins strategy with `updated_at` comparison; user notified of conflicts via toast. **Deleted Events**: Detect via Google Calendar `showDeleted=true` parameter; mark app bookings as cancelled. |
 | FR4.6 | Set booking status (proposed, confirmed, completed, cancelled) |
-| FR4.7 | Send email reminder 24 hours before booking |
+| FR4.7 | Send email reminder 24 hours before booking (calculated in user's timezone). **Timezone strategy**: All times stored in UTC; converted to user timezone on display; DST handled via IANA timezone database. |
 | FR4.8 | Reschedule bookings (move date/time) |
 | FR4.9 | Cancel bookings with optional client notification |
 | FR4.10 | View client's past/upcoming bookings in client detail page |
@@ -171,11 +171,11 @@ The MVP focuses on three core pillars:
 |----------|-------------|-----------------|
 | **Transport Security** | HTTPS only, TLS 1.2+ | Enforce via headers, Cloudflare configuration |
 | **Password Storage** | Bcrypt with cost ≥10 | Devise gem default, no plaintext storage |
-| **Authentication** | JWT tokens with 24h expiry | Secure secret key (≥32 chars), no storage in localStorage |
+| **Authentication** | JWT access (15m) + refresh tokens (7d) | Access token in memory; refresh token in httpOnly cookie; rotate on refresh |
 | **Authorization** | Role-based access (user owns data) | CanCanCan gem, verify user_id on all requests |
 | **SQL Injection** | Parameterized queries only | Rails ORM, no string concatenation |
 | **XSS Prevention** | Content Security Policy headers | CSP-Nonce for inline scripts, sanitize user input |
-| **CSRF Protection** | CSRF token on forms | Rails default, verify origin header |
+| **CSRF Protection** | CSRF token on state-changing requests | Rails default, verify origin header, SameSite=Strict cookies |
 | **GDPR Compliance** | Data export, right to deletion, consent | `/users/export` endpoint, soft delete, cookie banner |
 | **Data Encryption** | Sensitive fields encrypted at rest | PII encrypted (first/last name optional) |
 | **Audit Logging** | Activity log for all client access | `activity_logs` table, 1-year retention for compliance |
@@ -926,10 +926,15 @@ CREATE TABLE activity_logs (
 |-------|-------|---------|
 | `clients` | (user_id, status) | Fast filtering by user and status |
 | `clients` | (user_id, archived_at) | Soft-delete queries |
+| `clients` | GIN(to_tsvector(first_name \|\| last_name \|\| email)) | **Full-text search** for FR2.3 (500+ clients) |
+| `clients` | (user_id, email) | Duplicate detection on import |
 | `bookings` | (user_id, starts_at) | Calendar view queries by user and date |
-| `bookings` | (client_id, starts_at) | Client-specific calendar queries, overlap detection |
+| `bookings` | (user_id, starts_at, ends_at) | **Overlap detection** for double-booking prevention |
+| `bookings` | (client_id, starts_at) | Client-specific calendar queries |
 | `pipeline_stages` | (user_id, position) | Kanban board order |
 | `activity_logs` | (user_id, created_at) | Audit trail for user |
+
+**Search Performance Note**: Use PostgreSQL `pg_trgm` extension with GIN index for LIKE queries if full-text search insufficient. Target <100ms for 500 clients.
 
 ### Data Integrity Constraints
 
@@ -938,6 +943,14 @@ CREATE TABLE activity_logs (
 - Check constraints on enum fields (status, action_type)
 - NOT NULL constraints on required fields (email, first_name, last_name)
 - Timezone stored as IANA identifier for DST handling
+
+### Concurrent Edit Handling (Optimistic Locking)
+
+All mutable tables include `updated_at` timestamp for conflict detection:
+- **Strategy**: Compare `updated_at` on save; reject if stale (HTTP 409 Conflict)
+- **Implementation**: Rails `lock_version` column or manual `updated_at` check
+- **Client handling**: Show "Record was modified. Refresh and retry." message
+- **Affected tables**: `clients`, `bookings`, `client_notes`, `pipeline_stages`
 
 ---
 
@@ -2600,6 +2613,9 @@ Beta version is live. DM for access! #EventPlanning"
 | **R8** | Authentication system has security vulnerability | Low | Critical | Use battle-tested libraries (Devise, OmniAuth). Conduct security audit Week 10. Follow OWASP guidelines. Use strong JWT secrets. | Sec Lead |
 | **R9** | Deployment fails before launch (Week 12) | Medium | Critical | Practice deployments on staging every week. Automate everything (CI/CD pipeline). Maintain rollback procedures. Run deployment drill Week 11. | Eng Lead |
 | **R10** | User testing reveals core workflow issues | Medium | High | Conduct UX testing with 3 users Week 6, not Week 12. Validate assumptions early. Be willing to pivot. | PM |
+| **R11** | Failed sync creates data loss/corruption | Medium | Critical | Implement job queue (Sidekiq) with retry logic and dead-letter queue (DLQ). Log all sync failures to Sentry. Manual retry endpoint for failed syncs. | Eng Lead |
+| **R12** | Production deployment fails with no rollback | Medium | Critical | **Migration strategy**: Run migrations before deploy; use reversible migrations. **Rollback plan**: Keep previous release tagged; one-command rollback via Railway/Heroku. Test rollback Week 11. | Eng Lead |
+| **R13** | Email reminders fail silently | Medium | Medium | Log SendGrid/Mailgun delivery status. Implement retry for soft bounces. Add "resend reminder" button for user. Alert on bounce rate >5%. | Eng Lead |
 
 ### Risk Monitoring
 
@@ -2615,6 +2631,20 @@ Beta version is live. DM for access! #EventPlanning"
 - Third-party service down (Google, SendGrid)
 - Security vulnerability discovered
 - Core feature deemed unachievable
+
+### Monitoring & Alerting Thresholds
+
+| Metric | Warning | Critical | Action |
+|--------|---------|----------|--------|
+| API error rate | >1% | >5% | Page on-call; investigate Sentry |
+| API latency (p99) | >300ms | >500ms | Check slow queries; scale if needed |
+| Google Calendar quota | >70% | >90% | Reduce polling frequency; request increase |
+| DB connection pool | >80% | >95% | Scale connection pool; check leaks |
+| Email bounce rate | >3% | >5% | Review sender reputation; check addresses |
+| Uptime | <99.9% | <99.5% | Incident response; status page update |
+| Failed background jobs | >10/hr | >50/hr | Check Sidekiq; review DLQ |
+
+**Alerting Channels**: Sentry (errors), New Relic (performance), PagerDuty/Slack (critical)
 
 ### Contingency Plans
 
