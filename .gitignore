@@ -46,3 +46,4 @@
 # Env files
 .env
 .env.*
+/reports/*
