@@ -35,25 +35,26 @@ bundle exec rspec   # all specs should pass
 
 #### Client Model
 
-- [ ] Generate `Client` model
+- [ ] Generate `Client` model with fields:
   - `name:string` (required)
-  - `email:string`
+  - `email:string` (optional, validate format if present)
   - `phone:string`
+  - `company:string`
   - `notes:text`
   - `user:references` (foreign key, required)
-- [ ] Add model validations
+- [ ] Add model validations:
   - `belongs_to :user`
   - `validates :name, presence: true`
+  - `validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_blank: true`
+- [ ] Add `has_many :clients, dependent: :destroy` to User model
+- [ ] Add database index on `clients.user_id`
 - [ ] Run migration and verify
 
-#### Project Model (Optional)
+#### Deferred
 
-- [ ] Generate `Project` model
-  - `name:string` (required)
-  - `status:string` (default: "active")
-  - `user:references` (required)
-  - `client:references` (optional)
-- [ ] Add model associations and validations
+- **Project model**: deferred to a later week
+- **Client status field** (active/inactive/archived): deferred to a later week
+- **Soft delete / archiving**: deferred to a later week
 
 ### 2. Clients API Endpoints
 
@@ -65,14 +66,14 @@ All endpoints require JWT authentication (`Authorization: Bearer <token>`).
 | `/clients` | POST | Create a new client |
 | `/clients/:id` | GET | Show a specific client |
 | `/clients/:id` | PATCH | Update a client |
-| `/clients/:id` | DELETE | Delete a client |
+| `/clients/:id` | DELETE | Delete a client (hard delete) |
 
 - [ ] Generate `ClientsController`
 - [ ] Implement `index` action
 - [ ] Implement `show` action
 - [ ] Implement `create` action
 - [ ] Implement `update` action
-- [ ] Implement `destroy` action
+- [ ] Implement `destroy` action (hard delete)
 
 ### 3. Controller Standards
 
@@ -115,7 +116,17 @@ DELETE /clients/:id   → status: 204 (no content)
 ```
 401 Unauthorized      → { "error": "Unauthorized" }
 404 Not Found         → { "error": "Not found" }
-422 Unprocessable     → { "errors": [...] }
+422 Unprocessable     → { "errors": { "field": ["message"] } }
+```
+
+Example 422 response:
+```json
+{
+  "errors": {
+    "name": ["can't be blank"],
+    "email": ["is invalid"]
+  }
+}
 ```
 
 ## New Files
@@ -135,9 +146,12 @@ spec/
 ## Definition of Done
 
 - [ ] Client model exists with proper associations
+- [ ] User model has `has_many :clients`
+- [ ] Database index exists on `clients.user_id`
 - [ ] All 5 CRUD endpoints functional
-- [ ] All endpoints require authentication
+- [ ] All endpoints require authentication (401 on failure)
 - [ ] All queries scoped to current_user
+- [ ] Cross-user access returns 404
 - [ ] Request specs cover happy path, auth, and cross-user scenarios
 - [ ] All tests passing (`bundle exec rspec`)
 - [ ] Code committed and merged to main
