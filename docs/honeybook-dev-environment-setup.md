@@ -86,7 +86,40 @@ rails -v
 
 ---
 
-## 6. Create Rails API application (already completed)
+## 6. Install and start PostgreSQL
+
+Install PostgreSQL 16 via Homebrew:
+
+```bash
+brew install postgresql@16
+```
+
+Start the PostgreSQL service:
+
+```bash
+brew services start postgresql@16
+```
+
+Verify installation:
+
+```bash
+psql --version
+pg_isready
+```
+
+Expected: `pg_isready` prints `accepting connections`.
+
+**If `psql` or `pg_isready` is not found**, add the PostgreSQL bin directory to your PATH:
+
+```bash
+export PATH="$(brew --prefix)/opt/postgresql@16/bin:$PATH"
+```
+
+To make this permanent, add the line above to `~/.zshrc` (after the mise lines), then open a **NEW** terminal.
+
+---
+
+## 7. Create Rails API application (already completed)
 
 ```bash
 ruby -S rails new . -d postgresql --api --skip-test --force
@@ -94,22 +127,33 @@ ruby -S rails new . -d postgresql --api --skip-test --force
 
 ---
 
-## 7. Verify Rails boots
+## 8. Verify Rails boots
+
+Prepare the database:
+
+```bash
+bin/rails db:prepare
+```
+
+Start the server:
 
 ```bash
 bin/rails server
 ```
 
-Expected:
+Verify health endpoint:
 
-- Rails 7.2.x
-- Listening on http://127.0.0.1:3000
+```bash
+curl -i http://localhost:3000/up
+```
 
-Stop with `Ctrl+C`
+Expected: `HTTP/1.1 200 OK`
+
+Stop with `Ctrl+C`.
 
 ---
 
-## 8. VS Code Terminal Rule
+## 9. VS Code Terminal Rule
 
 Do **NOT** reload terminals.
 
@@ -117,7 +161,7 @@ Close the terminal tab and open a new one instead to preserve command markers.
 
 ---
 
-## 9. Source of Truth
+## 10. Source of Truth
 
 - `mise.toml` controls Ruby version
 - `~/.zshrc` controls PATH priority
